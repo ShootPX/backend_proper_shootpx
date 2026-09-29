@@ -250,6 +250,7 @@ def test_restore_requires_auth():
     assert res.status_code == 401
 
 
+@pytest.mark.real_db
 def test_soft_deleted_team_blocks_member_and_owner_access_real_db():
     """The access-blocking guarantee behind soft deletion, against the real
     database. is_team_member/is_team_owner now enforce it in a single joined
@@ -523,6 +524,7 @@ def test_list_team_generations_applies_feature_type_and_user_filters():
     assert query.filter.call_count == 2
 
 
+@pytest.mark.real_db
 def test_generations_status_and_internal_tool_filters_real_db():
     """status + user_id + the default internal-tool exclusion, against real
     Postgres (the predicates are SQL a MagicMock can't evaluate). Disposable
@@ -751,6 +753,7 @@ def test_create_invite_blocks_when_team_full(monkeypatch):
         assert "full" in str(e).lower()
 
 
+@pytest.mark.real_db
 def test_only_an_owner_can_delete_or_restore_a_team_real_db(monkeypatch):
     """An editor calling DELETE / restore on their own team must get 403 and
     change nothing -- exercised through the real routes against real Postgres

@@ -46,6 +46,7 @@ def _db(tool):
     return db
 
 
+@pytest.mark.real_db
 def test_cache_miss_queries_the_db_and_populates_the_cache(real_cache):
     tool = _tool()
     db = _db(tool)

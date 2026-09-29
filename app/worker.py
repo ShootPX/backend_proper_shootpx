@@ -23,6 +23,7 @@ from app.models.generation_job import GenerationJob
 from app.services.tool_definitions import get_tool_definition
 from app.services.credits import refill_subscription_credits, refund_credits
 from app.services.webhooks import send_renewal_notice_email
+from app.services import ledger as ledger_svc
 from app.services.generation_lock import (
     release_generation_lock, try_reserve_fal_slot, release_fal_slot, INFLIGHT_KEY_GLOBAL,
 )
@@ -182,6 +183,17 @@ async def refill_due_subscriptions(ctx):
             if plan.period_label not in step:
                 continue
 
+            # Same transaction as the refill and the next_refill_at advance below.
+            # Keyed by the slice's own due time, so a retried run can't record it twice.
+            due_at = locked_sub.next_refill_at
+            before = ledger_svc.subscription_pool_balance(db, locked_sub.team_id)
+            ledger_svc.record_subscription_grant(
+                db, team_id=locked_sub.team_id, balance_before=before,
+                balance_after=locked_sub.credits_per_refill,
+                idempotency_key=f"refill:{locked_sub.id}:{due_at.isoformat()}", source="worker",
+                razorpay_subscription_id=locked_sub.razorpay_subscription_id,
+                metadata=ledger_svc.plan_metadata(plan),
+            )
             refill_subscription_credits(db, locked_sub.team_id, locked_sub.credits_per_refill, commit=False)
             locked_sub.next_refill_at = now + step[plan.period_label]
             db.commit()
@@ -304,6 +316,55 @@ async def cleanup_stale_pending_subscriptions(ctx):
 
     db.commit()
     db.close()
+
+
+async def expire_pending_switches(ctx):
+    """Cancel upgrade checkouts nobody paid for within PENDING_SWITCH_TTL_HOURS.
+
+    The team's current plan was never touched by the switch, so this only
+    cancels the unpaid replacement at Razorpay and clears the pending columns.
+    A checkout that was actually paid is left alone (see
+    billing.expire_pending_switch). One row's failure never blocks the rest.
+    """
+    from app.services.billing import expire_pending_switch
+
+    db = SessionLocal()
+    try:
+        due_ids = [
+            row_id for (row_id,) in db.query(TeamSubscription.id).filter(
+                TeamSubscription.pending_switch_expires_at.isnot(None),
+                TeamSubscription.pending_switch_expires_at <= datetime.now(timezone.utc),
+            ).all()
+        ]
+        db.rollback()  # end the read transaction before the per-row locking work
+        for row_id in due_ids:
+            try:
+                expire_pending_switch(db, row_id)
+            except Exception:
+                db.rollback()
+                logger.exception("failed to expire pending switch for subscription row %s", row_id)
+    finally:
+        db.close()
+
+
+async def reconcile_subscriptions(ctx):
+    """Hourly: compare live subscriptions with Razorpay and repair what webhooks
+    missed (see services/reconciliation.py). The whole batch runs in a thread --
+    it is a series of blocking Razorpay calls, and every job and cron shares this
+    worker's one event loop (a stalled loop trips the watchdog)."""
+    from app.services.reconciliation import reconcile_due_subscriptions
+
+    def run() -> dict:
+        db = SessionLocal()
+        try:
+            return reconcile_due_subscriptions(db)
+        finally:
+            db.close()
+
+    try:
+        await asyncio.to_thread(run)
+    except Exception:
+        logger.exception("reconcile_subscriptions run failed -- will retry next hour")
 
 
 async def purge_expired_deleted_teams(ctx):
@@ -869,6 +930,8 @@ class WorkerSettings:
         refill_due_subscriptions,
         send_yearly_renewal_notices,
         cleanup_stale_pending_subscriptions,
+        expire_pending_switches,
+        reconcile_subscriptions,
         submit_generation_to_fal,
         sweep_stale_generation_jobs,
         check_generation_timeouts,
@@ -879,6 +942,8 @@ class WorkerSettings:
         cron(refill_due_subscriptions, hour=3, minute=0),
         cron(send_yearly_renewal_notices, hour=3, minute=30),
         cron(cleanup_stale_pending_subscriptions, minute={7, 22, 37, 52}),
+        cron(expire_pending_switches, minute={3, 18, 33, 48}),
+        cron(reconcile_subscriptions, minute={11}),
         cron(sweep_stale_generation_jobs, minute={0, 15, 30, 45}),
         cron(check_generation_timeouts, second={0, 15, 30, 45}),
         cron(reconcile_fal_slots, minute={0, 10, 20, 30, 40, 50}),

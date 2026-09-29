@@ -2,10 +2,12 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.core.limiter import limiter
+import pytest
 
 client = TestClient(app)
 
 
+@pytest.mark.real_db
 def test_rate_limit_triggers_429(monkeypatch):
     # re-enable the limiter just for this test (conftest disables it globally)
     limiter.enabled = True

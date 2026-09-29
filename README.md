@@ -256,8 +256,7 @@ No silent defaults — if a variable is missing or invalid, the app refuses to s
 | `PUBLIC_BACKEND_URL` | `https://api.shootpx.com` | Publicly reachable base URL fal.ai's webhook calls back to (`{PUBLIC_BACKEND_URL}/webhooks/fal`) — needs a tunnel (e.g. ngrok) to work locally |
 | `SUPABASE_URL` | `https://xxx.supabase.co` | Supabase project URL — used for storing generated output images |
 | `SUPABASE_SERVICE_ROLE_KEY` | `xxx` | Supabase service role key (storage uploads) |
-| `FAL_CONCURRENCY_LIMIT` | `10` | Max fal.ai jobs in flight account-wide at once |
-| `FAL_PER_TEAM_CONCURRENCY_LIMIT` | `2` | Max fal.ai jobs in flight per team at once |
+| `FAL_PER_TEAM_CONCURRENCY_LIMIT` | `5` | Max fal.ai jobs in flight per team at once |
 | `WORKER_WATCHDOG_SECONDS` | `180` (optional) | Seconds the worker's event loop may be silent before it alerts and exits for a restart. `0` disables |
 | `ALERT_WEBHOOK_URL` | *(unset)* (optional) | Slack/Discord-style incoming webhook that receives the `WORKER_FROZEN` alert |
 

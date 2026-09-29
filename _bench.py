@@ -8,7 +8,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 LABEL = sys.argv[1] if len(sys.argv) > 1 else "run"
-API_KEY = "AIzaSyB6-vtCUQUsbaul4yXnAmFS44N7JDrxcSk"
+API_KEY = os.environ.get("FIREBASE_WEB_API_KEY")
+if not API_KEY:
+    sys.exit("Set FIREBASE_WEB_API_KEY in .env (Firebase console > Project settings > Web API Key)")
 
 from firebase_admin import auth as fb_auth
 import app.core.firebase  # noqa

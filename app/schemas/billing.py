@@ -29,6 +29,7 @@ class SubscriptionOut(_CamelModel):
     credits: int
     info: list[str] = []
     tag: Optional[str] = None
+    is_popular: bool = False
     sort_order: int = 0
 
     _fix_info = field_validator("info", mode="before")(_normalize_info)

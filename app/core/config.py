@@ -70,6 +70,11 @@ class Settings(BaseSettings):
     # Optional Slack/Discord-style incoming webhook. When set, a frozen-worker
     # event POSTs a message there in addition to the CRITICAL log line.
     alert_webhook_url: str | None = None
+    # How long an unpaid plan-switch (upgrade) checkout may stay pending before
+    # the worker cancels the unpaid Razorpay subscription and clears it. OPTIONAL
+    # with a default, like the worker settings above. 24h leaves room for slow
+    # UPI-mandate / bank-OTP authorisations.
+    pending_switch_ttl_hours: int = 24
 
     @property
     def cors_origins_list(self) -> list[str]:

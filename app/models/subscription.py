@@ -16,6 +16,7 @@ class Subscription(Base):
     credits = Column(Integer, nullable=False)
     info = Column(JSONB, nullable=False, default=list)
     tag = Column(Text, nullable=True)
+    is_popular = Column(Boolean, nullable=False, default=False, server_default="false")
     sort_order = Column(Integer, nullable=False, default=0)
     razorpay_plan_id = Column(Text, nullable=True)  
     is_active = Column(Boolean, nullable=False, default=True)

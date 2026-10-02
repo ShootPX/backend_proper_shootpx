@@ -29,7 +29,8 @@ from app.services.teams import (
 )
 from app.services.generation import list_team_generations
 from app.services.usage import get_team_usage
-from app.schemas.teams import TeamBillingOut
+from app.schemas.teams import BillingHistoryOut, TeamBillingOut
+from app.services.ledger import DEFAULT_HISTORY_PAGE_SIZE, list_billing_history
 from app.services.team_invites import (
     accept_invite, cancel_invite, create_invite, list_pending_invites,
     InviteEmailRateLimitedError, TeamFullError,
@@ -295,6 +296,27 @@ def team_billing(
         raise HTTPException(status_code=404, detail=str(e))
 
     return billing
+
+
+@router.get("/teams/{team_id}/billing/history", response_model=BillingHistoryOut)
+@limiter.limit("30/minute")
+def team_billing_history(
+    request: Request,
+    team_id: UUID,
+    limit: int = DEFAULT_HISTORY_PAGE_SIZE,
+    cursor: str | None = None,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Credits that came in for this team (plan grants, plan-switch transfers, paid
+    top-ups), newest first. Same visibility as GET /teams/{id}/billing: any member."""
+    if not is_team_member(db, team_id, user.id):
+        raise HTTPException(status_code=403, detail="You are not a member of this team")
+
+    try:
+        return list_billing_history(db, team_id, limit=limit, cursor=cursor)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 MAX_GENERATIONS_PAGE_SIZE = 50

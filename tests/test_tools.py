@@ -12,6 +12,7 @@ from app.models.tool_definition import ToolDefinition
 client = TestClient(app)
 
 
+@pytest.mark.real_db
 def test_tools_returns_list():
     res = client.get("/landing/tools")
     assert res.status_code == 200
@@ -21,15 +22,17 @@ def test_tools_returns_list():
     assert isinstance(body["tools"], list)
 
 
+@pytest.mark.real_db
 def test_tool_shape():
     res = client.get("/landing/tools")
     tools = res.json()["tools"]
     if tools:
         first = tools[0]
-        for key in ("featureType", "displayName", "category", "isComingSoon", "cardSortOrder", "status"):
+        for key in ("featureType", "displayName", "category", "isComingSoon", "cardSortOrder", "thumbUrl", "status"):
             assert key in first
 
 
+@pytest.mark.real_db
 def test_tool_shape_never_leaks_raw_stage_or_is_active():
     """stage/is_active are ORM-row-only inputs used to DERIVE `status` at
     construction time (ToolOut.from_row) -- they are never fields on ToolOut
@@ -41,6 +44,7 @@ def test_tool_shape_never_leaks_raw_stage_or_is_active():
         assert "is_active" not in tool
 
 
+@pytest.mark.real_db
 def test_status_is_live_for_real_active_tools():
     """The actual regression this guards: real, working tools (is_active=true,
     stage=1) were showing as isComingSoon=false with no `status` field at
@@ -114,6 +118,7 @@ def test_status_survives_a_cache_round_trip():
     assert reconstructed.status == "live"
 
 
+@pytest.mark.real_db
 def test_tools_only_returns_rows_with_display_name():
     """enhance_prompt / model_shoot_generate_model are internal utility tools
     with no marketing copy (display_name is null) -- they must never show up
@@ -128,6 +133,7 @@ def test_tools_only_returns_rows_with_display_name():
 # GET /landing/homepage-slides
 # --------------------------------------------------------------------------- #
 
+@pytest.mark.real_db
 def test_homepage_slides_returns_list():
     res = client.get("/landing/homepage-slides")
     assert res.status_code == 200
@@ -136,6 +142,7 @@ def test_homepage_slides_returns_list():
     assert isinstance(body["slides"], list)
 
 
+@pytest.mark.real_db
 def test_homepage_slide_shape():
     res = client.get("/landing/homepage-slides")
     slides = res.json()["slides"]

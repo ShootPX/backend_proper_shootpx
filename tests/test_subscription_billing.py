@@ -10,6 +10,7 @@ Same trust rules as the credit-pack flow:
 
 import logging
 import uuid
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
 import pytest
@@ -233,7 +234,9 @@ def _activated_db(plan, locked=None, team_sub_by_team=None):
         name = getattr(model, "__name__", "")
         if name == "TeamSubscription":
             seen["ts"] += 1
-            val = locked if seen["ts"] == 1 else team_sub_by_team
+            # query 1 is the pending-switch lookup, query 2 the normal lookup by
+            # razorpay id (both resolve to `locked`), query 3 the team_id fallback
+            val = locked if seen["ts"] <= 2 else team_sub_by_team
             q.filter.return_value.with_for_update.return_value.first.return_value = val
             q.filter.return_value.first.return_value = val
         elif name == "Subscription":
@@ -697,3 +700,70 @@ def test_renewal_notice_smtp_failure_does_not_fail_the_whole_webhook(monkeypatch
     assert team_sub.last_paid_count == 11     # idempotency counter still advanced
     db.commit.assert_called_once()            # the webhook still completes and commits
     assert "renewal-notice" in caplog.text.lower()
+
+
+# --------------------------------------------------------------------------- #
+# subscription.charged advances current_period_end
+# --------------------------------------------------------------------------- #
+
+def _charged_setup(monkeypatch, razor_sub, *, last_paid_count, status="active"):
+    monkeypatch.setattr(webhooks_svc, "refill_subscription_credits", lambda *a, **k: None)
+    monkeypatch.setattr(
+        webhooks_svc.razorpay_client.subscription, "fetch", lambda sid: {"id": sid, **razor_sub},
+    )
+    old_end = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    team_sub = MagicMock(
+        team_id=str(TEAM_ID), subscription_id=str(SUB_ID), status=status,
+        credits_per_refill=350, last_paid_count=last_paid_count, current_period_end=old_end,
+    )
+    return team_sub, old_end
+
+
+def test_charged_renewal_sets_period_end_to_razorpays_cycle_end(monkeypatch):
+    cycle_end = int(datetime(2026, 8, 31, tzinfo=timezone.utc).timestamp())  # a 31-day month
+    team_sub, _ = _charged_setup(monkeypatch, {"paid_count": 2, "current_end": cycle_end}, last_paid_count=1)
+
+    webhooks_svc.handle_subscription_charged(_charged_db(team_sub, FakePlan()), _sub_event("subscription.charged"))
+
+    assert team_sub.current_period_end == datetime.fromtimestamp(cycle_end, tz=timezone.utc)
+
+
+def test_charged_renewal_falls_back_to_now_plus_period_without_current_end(monkeypatch):
+    team_sub, old_end = _charged_setup(monkeypatch, {"paid_count": 2}, last_paid_count=1)
+    before = datetime.now(timezone.utc)
+
+    webhooks_svc.handle_subscription_charged(_charged_db(team_sub, FakePlan()), _sub_event("subscription.charged"))
+
+    assert team_sub.current_period_end >= before + timedelta(days=30)
+    assert team_sub.current_period_end > old_end
+
+
+def test_charged_redelivery_does_not_push_period_end_out_again(monkeypatch):
+    cycle_end = int(datetime(2026, 8, 31, tzinfo=timezone.utc).timestamp())
+    team_sub, _ = _charged_setup(monkeypatch, {"paid_count": 2, "current_end": cycle_end}, last_paid_count=1)
+    db = _charged_db(team_sub, FakePlan())
+
+    webhooks_svc.handle_subscription_charged(db, _sub_event("subscription.charged"))
+    first = team_sub.current_period_end
+    webhooks_svc.handle_subscription_charged(db, _sub_event("subscription.charged"))  # redelivered
+
+    assert team_sub.current_period_end == first
+
+
+# --------------------------------------------------------------------------- #
+# plans API: is_popular comes from the row, not from a plan name
+# --------------------------------------------------------------------------- #
+
+def test_subscription_out_exposes_is_popular_from_the_row():
+    from types import SimpleNamespace
+    from app.schemas.billing import SubscriptionOut
+
+    def out(slug, popular):
+        row = SimpleNamespace(
+            id=uuid.uuid4(), slug=slug, name=slug, price=1, billing_period_days=30,
+            period_label="month", credits=1, info=[], tag=None, is_popular=popular, sort_order=0,
+        )
+        return SubscriptionOut.model_validate(row).model_dump(by_alias=True)
+
+    assert out("monthly", True)["isPopular"] is True
+    assert out("monthly", False)["isPopular"] is False      # same slug, flag decides

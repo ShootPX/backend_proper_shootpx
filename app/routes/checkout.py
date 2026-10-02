@@ -13,6 +13,7 @@ from app.services.billing import (
     create_subscription_checkout,
     cancel_subscription,
     RazorpayCancelError,
+    PlanSwitchBlocked,
     switch_subscription
 )
 router = APIRouter(prefix="/billing", tags=["checkout"])
@@ -90,6 +91,15 @@ def switch_team_subscription(
 
     try:
         checkout = switch_subscription(db, team_id, new_subscription_id)
+    except PlanSwitchBlocked as e:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": e.code,
+                "message": str(e),
+                "current_period_end": e.current_period_end.isoformat(),
+            },
+        )
     except (ValueError, RazorpayCancelError) as e:
         raise HTTPException(status_code=400, detail=str(e))
 

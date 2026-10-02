@@ -2392,6 +2392,7 @@ def test_generate_model_shoot_library_garments_count_toward_the_garment_requirem
     assert "At least one garment image is required" in res.json()["detail"]
 
 
+@pytest.mark.real_db
 def test_resolve_source_job_urls_real_db_enforces_team_status_and_output():
     """The security-relevant part, against real Postgres: only THIS team's
     completed jobs that actually have an output can be reused. Anything else

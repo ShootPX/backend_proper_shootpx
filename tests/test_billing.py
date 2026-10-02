@@ -1,6 +1,9 @@
 from fastapi.testclient import TestClient
 
 from app.main import app
+import pytest
+
+pytestmark = pytest.mark.real_db  # reads the real catalog / teams tables
 
 client = TestClient(app)
 

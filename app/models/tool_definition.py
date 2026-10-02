@@ -23,3 +23,7 @@ class ToolDefinition(Base):
     category = Column(Text, nullable=False, default="shoot")
     is_coming_soon = Column(Boolean, nullable=False, default=False)
     card_sort_order = Column(Integer, nullable=False, default=0)
+    # Public URL of the tool's card thumbnail (landing grid + studio ToolCard).
+    # Nullable: internal tools and not-yet-illustrated tools have none, and the
+    # frontend falls back to a placeholder.
+    thumb_url = Column(Text, nullable=True)

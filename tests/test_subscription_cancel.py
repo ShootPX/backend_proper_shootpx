@@ -44,7 +44,7 @@ def test_cancel_no_subscription_raises_and_never_touches_razorpay(monkeypatch):
 
 
 def test_cancel_calls_razorpay_before_local_status_change(monkeypatch):
-    team_sub = MagicMock(razorpay_subscription_id="sub_live_1", status="active")
+    team_sub = MagicMock(pending_razorpay_subscription_id=None, razorpay_subscription_id="sub_live_1", status="active")
     seen = {}
 
     def fake_cancel(sid):
@@ -63,7 +63,7 @@ def test_cancel_calls_razorpay_before_local_status_change(monkeypatch):
 
 
 def test_cancel_razorpay_failure_leaves_status_unchanged(monkeypatch):
-    team_sub = MagicMock(razorpay_subscription_id="sub_live_1", status="active")
+    team_sub = MagicMock(pending_razorpay_subscription_id=None, razorpay_subscription_id="sub_live_1", status="active")
 
     def boom(sid):
         raise RuntimeError("razorpay 500")
@@ -85,7 +85,7 @@ def test_cancel_pending_row_with_stored_id_still_calls_razorpay(monkeypatch):
     monkeypatch.setattr(
         billing_svc.razorpay_client.subscription, "cancel", lambda sid: calls.append(sid)
     )
-    team_sub = MagicMock(razorpay_subscription_id="sub_live_7", status="pending")
+    team_sub = MagicMock(pending_razorpay_subscription_id=None, razorpay_subscription_id="sub_live_7", status="pending")
     db = _cancel_db(team_sub)
 
     billing_svc.cancel_subscription(db, TEAM_ID)
@@ -98,7 +98,7 @@ def test_pending_cancel_then_late_activated_does_not_resurrect(monkeypatch):
     """The full sequence: pending row with a real id -> owner cancels (Razorpay
     reached) -> a late subscription.activated for that id is a clean no-op."""
     SUB = "sub_live_42"
-    row = MagicMock(status="pending", razorpay_subscription_id=SUB,
+    row = MagicMock(status="pending", razorpay_subscription_id=SUB, pending_razorpay_subscription_id=None,
                     subscription_id=uuid.uuid4(), team_id=str(TEAM_ID))
 
     # cancel during the pending window
@@ -138,7 +138,7 @@ def test_pending_cancel_then_late_activated_does_not_resurrect(monkeypatch):
 @pytest.fixture
 def cancel_client(monkeypatch):
     fake_user = MagicMock(id=uuid.uuid4())
-    state = {"team_sub": MagicMock(razorpay_subscription_id="sub_live_1", status="active"),
+    state = {"team_sub": MagicMock(pending_razorpay_subscription_id=None, razorpay_subscription_id="sub_live_1", status="active"),
              "razorpay_ok": True}
 
     db = MagicMock()
@@ -422,6 +422,7 @@ def test_restore_internal_boundary_day_31_fails(monkeypatch):
 # live dev DB, same pattern as this session's earlier soft-delete smoke test.
 # --------------------------------------------------------------------------- #
 
+@pytest.mark.real_db
 def test_purge_sweep_exact_boundary_against_real_db():
     from app.core.database import SessionLocal
     from app.models.team import Team
@@ -471,6 +472,7 @@ def test_purge_sweep_exact_boundary_against_real_db():
         db.close()
 
 
+@pytest.mark.real_db
 def test_day_30_restore_and_purge_cannot_both_succeed_on_the_same_team(monkeypatch):
     """The actual regression this fix closes: ONE real team, sitting at
     EXACTLY GRACE_PERIOD_DAYS, checked against BOTH operations. Before the

@@ -30,7 +30,8 @@ def _row(status="pending", credits_per_refill=0, subscription_id=PLAN_A, razorpa
         team_id=TEAM_ID, status=status, credits_per_refill=credits_per_refill,
         subscription_id=subscription_id, razorpay_subscription_id=razorpay_id,
         current_period_end=datetime(2026, 9, 20, tzinfo=timezone.utc), next_refill_at=None,
-        renewal_notice_sent_at=None,
+        renewal_notice_sent_at=None, pending_razorpay_subscription_id=None,
+        pending_subscription_id=None, pending_switch_id=None, pending_switch_expires_at=None,
     )
 
 

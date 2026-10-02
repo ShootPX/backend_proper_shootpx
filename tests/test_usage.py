@@ -8,6 +8,9 @@ from datetime import datetime, timedelta, timezone
 
 from app.core.database import SessionLocal
 from app.services import usage as usage_svc
+import pytest
+
+pytestmark = pytest.mark.real_db  # reads the real catalog / teams tables
 
 REAL_TEAM_ID = "a85531bd-d19f-4865-8f2d-b148192fcf46"
 

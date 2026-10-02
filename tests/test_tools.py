@@ -28,7 +28,7 @@ def test_tool_shape():
     tools = res.json()["tools"]
     if tools:
         first = tools[0]
-        for key in ("featureType", "displayName", "category", "isComingSoon", "cardSortOrder", "status"):
+        for key in ("featureType", "displayName", "category", "isComingSoon", "cardSortOrder", "thumbUrl", "status"):
             assert key in first
 
 

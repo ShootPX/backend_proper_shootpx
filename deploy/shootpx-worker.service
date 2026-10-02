@@ -1,0 +1,19 @@
+[Unit]
+Description=ShootPX arq worker (generation jobs, cron)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=shootpx
+Group=shootpx
+WorkingDirectory=/opt/shootpx/backend
+ExecStart=/opt/shootpx/backend/venv/bin/arq app.worker.WorkerSettings
+# The worker's watchdog hard-exits when frozen; systemd brings it back.
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

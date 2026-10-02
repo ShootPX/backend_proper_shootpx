@@ -32,6 +32,7 @@ class ToolOut(_CamelModel):
     category: str
     is_coming_soon: bool
     card_sort_order: int = 0
+    thumb_url: Optional[str] = None
     # A plain, stored field -- computed ONCE from the ORM row (see
     # ToolOut.from_row below), not derived lazily on every read. This response
     # is Redis-cached (routes/tools.py's CACHE_KEY): a computed_field/property
@@ -54,6 +55,7 @@ class ToolOut(_CamelModel):
             category=tool.category,
             is_coming_soon=tool.is_coming_soon,
             card_sort_order=tool.card_sort_order,
+            thumb_url=tool.thumb_url,
             status=derive_tool_status(tool.stage, tool.is_active),
         )
 

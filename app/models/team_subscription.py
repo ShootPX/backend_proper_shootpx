@@ -29,3 +29,17 @@ class TeamSubscription(Base):
     # re-sends). Reset to NULL on a fresh subscribe (see
     # create_subscription_checkout) so a new cycle can send its own notice.
     renewal_notice_sent_at = Column(DateTime(timezone=True), nullable=True)
+    # A pending plan switch: an upgrade whose replacement Razorpay subscription
+    # has been created but not yet paid. The current plan (everything above) stays
+    # live until that subscription's `activated` webhook promotes the switch --
+    # see billing.switch_subscription / webhooks._promote_pending_switch. The
+    # four columns are all set or all NULL (enforced by a CHECK in the migration).
+    # Deliberately NOT in razorpay_subscription_id: the replacement's own
+    # webhooks (including the `cancelled` we trigger when replacing or expiring
+    # it) must not match this row's live subscription.
+    pending_subscription_id = Column(UUID(as_uuid=True), ForeignKey("subscription.id"), nullable=True)
+    pending_razorpay_subscription_id = Column(Text, nullable=True, unique=True)
+    pending_switch_id = Column(UUID(as_uuid=True), nullable=True)
+    pending_switch_expires_at = Column(DateTime(timezone=True), nullable=True)
+    # When services/reconciliation.py last compared this row with Razorpay.
+    last_reconciled_at = Column(DateTime(timezone=True), nullable=True)

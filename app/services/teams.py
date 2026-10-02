@@ -5,6 +5,7 @@ from uuid import UUID
 from sqlalchemy.orm import Session
 
 from app.models.billing_transaction import BillingTransaction
+from app.models.credit_ledger import CreditLedger
 from app.models.generation_job import GenerationJob
 from app.models.team import Team
 from app.models.team_invite import TeamInvite
@@ -311,10 +312,11 @@ def purge_team(db: Session, team_id) -> None:
     """
     # FKs to teams are ON DELETE NO ACTION, so every child row must go first --
     # every table with a team_id FK (checked: generation_jobs, billing_transactions,
-    # team_subscriptions, team_invites, team_members) must be listed here, or the
+    # credit_ledger, team_subscriptions, team_invites, team_members) must be listed here, or the
     # final Team delete below hits a real FK violation for any team that used it.
     db.query(GenerationJob).filter(GenerationJob.team_id == team_id).delete(synchronize_session=False)
     db.query(BillingTransaction).filter(BillingTransaction.team_id == team_id).delete(synchronize_session=False)
+    db.query(CreditLedger).filter(CreditLedger.team_id == team_id).delete(synchronize_session=False)
     db.query(TeamSubscription).filter(TeamSubscription.team_id == team_id).delete(synchronize_session=False)
     db.query(TeamInvite).filter(TeamInvite.team_id == team_id).delete(synchronize_session=False)
     db.query(TeamMember).filter(TeamMember.team_id == team_id).delete(synchronize_session=False)
@@ -398,6 +400,16 @@ def get_team_billing(db: Session, team_id: UUID) -> dict:
     team, sub, plan = row
     unpaid = is_unpaid_checkout(sub)
 
+    pending_switch = None
+    pending_plan_id = getattr(sub, "pending_subscription_id", None) if sub else None
+    if pending_plan_id:
+        pending_plan = db.query(Subscription).filter(Subscription.id == pending_plan_id).first()
+        expires_at = sub.pending_switch_expires_at
+        pending_switch = {
+            "plan": pending_plan.slug if pending_plan else None,
+            "expires_at": expires_at.isoformat() if expires_at else None,
+        }
+
     return {
         "total_credits": get_total_credits(team),
         "subscription_credits": team.subscription_credits_remaining,
@@ -412,4 +424,5 @@ def get_team_billing(db: Session, team_id: UUID) -> dict:
         # An unpaid attempt has no billing period -- the placeholder date the
         # checkout claim stores must never be shown as a renewal date.
         "current_period_end": sub.current_period_end.isoformat() if sub and not unpaid else None,
+        "pending_switch": pending_switch,
     }

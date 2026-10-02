@@ -15,6 +15,8 @@ from datetime import datetime, timedelta, timezone
 from app.models.team_subscription import TeamSubscription
 from app.models.subscription import Subscription
 from app.services.credits import refill_subscription_credits
+from app.services.billing import clear_pending_switch
+from app.services import ledger as ledger_svc
 from app.models.team_member import TeamMember
 from app.models.user import User
 from app.core.email import send_email
@@ -190,7 +192,15 @@ def handle_payment_captured(db: Session, event: dict) -> None:
         db.rollback()
         return  # another worker got here first
 
-    add_topup_credits(db, team_id, credits, commit=False)
+    team_after = add_topup_credits(db, team_id, credits, commit=False)
+    balance_after = getattr(team_after, "topup_credits_balance", None)
+    ledger_svc.record_credit_entry(
+        db, team_id=team_id, pool="topup", entry_type=ledger_svc.TOPUP_PURCHASE,
+        amount=credits, balance_after=balance_after if isinstance(balance_after, int) else None,
+        idempotency_key=f"payment:{razorpay_payment_id}", source="webhook",
+        razorpay_payment_id=razorpay_payment_id,
+        metadata={"amount": amount_paid, "pack": getattr(pack, "slug", None)},
+    )
     db.commit()
 
 
@@ -205,8 +215,147 @@ def _credits_per_refill(plan: Subscription) -> int:
     return plan.credits // 12 if plan.period_label == "year" else plan.credits
 
 
+# Razorpay states in which cancelling the OLD subscription is already done, so a
+# "cancel" error just means a previous (partly failed) delivery got that far.
+_SUBSCRIPTION_ALREADY_ENDED = ("cancelled", "completed", "expired")
+
+
+def _cancel_old_subscription_for_switch(old_razorpay_id: str, team_sub, switch_id, new_razorpay_id: str) -> None:
+    """Cancel the plan being replaced. Idempotent across webhook retries: if the
+    cancel fails but Razorpay says it has already ended (a prior delivery cancelled
+    it and then failed to commit), that counts as success. Any other failure
+    raises so Razorpay redelivers the webhook, after an ERROR that carries
+    everything needed to find the pair by hand."""
+    try:
+        razorpay_client.subscription.cancel(old_razorpay_id)
+        return
+    except Exception as cancel_err:
+        try:
+            status = razorpay_client.subscription.fetch(old_razorpay_id).get("status")
+        except Exception:
+            status = None
+        if status in _SUBSCRIPTION_ALREADY_ENDED:
+            return
+        logger.error(
+            "switch activation: could not cancel the OLD subscription -- the user has paid "
+            "for the new plan but the old one is still live. Raising so Razorpay retries: "
+            "team_id=%s switch_id=%s old_razorpay_subscription_id=%s new_razorpay_subscription_id=%s "
+            "old_status=%s",
+            team_sub.team_id, switch_id, old_razorpay_id, new_razorpay_id, status,
+            exc_info=cancel_err,
+        )
+        raise
+
+
+def _promote_pending_switch(db: Session, team_sub, razorpay_subscription_id: str) -> None:
+    """The replacement subscription of a pending switch was just paid for
+    (`subscription.activated`). Cancel the old plan, move its leftover credits to
+    top-up, install the new plan and clear the pending switch -- all in ONE commit.
+
+    Idempotent: a redelivery no longer matches the (cleared) pending column and
+    falls through to handle_subscription_activated's "already active" skip. If a
+    delivery cancels the old plan and then fails to commit, the retry sees the old
+    plan already ended and carries on.
+
+    `team_sub` is already locked FOR UPDATE by the caller.
+    """
+    switch_id = team_sub.pending_switch_id
+    plan = db.query(Subscription).filter(Subscription.id == team_sub.pending_subscription_id).first()
+    if not plan:
+        logger.error(
+            "pending switch %s for team %s targets an unknown plan %s",
+            switch_id, team_sub.team_id, team_sub.pending_subscription_id,
+        )
+        return
+
+    # Same server-to-server verification as a normal activation: never trust the
+    # webhook payload, and make sure Razorpay's subscription really is the plan
+    # and switch we stored.
+    try:
+        razor_sub = razorpay_client.subscription.fetch(razorpay_subscription_id)
+    except Exception:
+        logger.exception("could not fetch Razorpay subscription %s", razorpay_subscription_id)
+        raise  # let Razorpay retry
+    notes = razor_sub.get("notes") or {}
+    if razor_sub.get("plan_id") != plan.razorpay_plan_id or notes.get("switch_id") != str(switch_id):
+        logger.error(
+            "pending switch mismatch on subscription.activated: sub=%s switch_id=%s "
+            "expected_plan=%s got_plan=%s notes_switch_id=%s",
+            razorpay_subscription_id, switch_id, plan.razorpay_plan_id,
+            razor_sub.get("plan_id"), notes.get("switch_id"),
+        )
+        return
+
+    old_razorpay_id = team_sub.razorpay_subscription_id
+    if old_razorpay_id:
+        _cancel_old_subscription_for_switch(old_razorpay_id, team_sub, switch_id, razorpay_subscription_id)
+
+    now = datetime.now(timezone.utc)
+    period = _PERIOD[plan.period_label]
+    credits_per_refill = _credits_per_refill(plan)
+
+    team = db.query(Team).filter(Team.id == team_sub.team_id).with_for_update().first()
+    if team is None:
+        raise ValueError("Team not found")
+    # Unused credits of the plan being replaced are kept (moved to top-up), then
+    # the new plan's first slice replaces the pool -- the same as a fresh activation.
+    leftover = team.subscription_credits_remaining
+    team.topup_credits_balance += leftover
+    team.subscription_credits_remaining = credits_per_refill
+    if leftover:
+        for pool, amount, balance_after, leg in (
+            ("subscription", -leftover, 0, "out"),
+            ("topup", leftover, team.topup_credits_balance, "in"),
+        ):
+            ledger_svc.record_credit_entry(
+                db, team_id=team_sub.team_id, pool=pool, entry_type=ledger_svc.SWITCH_TRANSFER,
+                amount=amount, balance_after=balance_after,
+                idempotency_key=f"switch:{switch_id}:{leg}", source="webhook",
+                razorpay_subscription_id=razorpay_subscription_id, switch_id=switch_id,
+            )
+    ledger_svc.record_credit_entry(
+        db, team_id=team_sub.team_id, pool="subscription", entry_type=ledger_svc.SUBSCRIPTION_GRANT,
+        amount=credits_per_refill, balance_after=credits_per_refill,
+        idempotency_key=f"sub:{razorpay_subscription_id}:cycle:1", source="webhook",
+        razorpay_subscription_id=razorpay_subscription_id, switch_id=switch_id,
+        metadata=ledger_svc.plan_metadata(plan, cycle=1, charged=True),
+    )
+
+    team_sub.subscription_id = plan.id
+    team_sub.razorpay_subscription_id = razorpay_subscription_id
+    team_sub.status = "active"
+    team_sub.credits_per_refill = credits_per_refill
+    team_sub.last_paid_count = 0
+    team_sub.next_refill_at = now + (timedelta(days=30) if plan.period_label == "year" else period)
+    team_sub.current_period_end = now + period
+    team_sub.renewal_notice_sent_at = None
+    clear_pending_switch(team_sub)
+
+    try:
+        db.commit()
+    except Exception:
+        logger.error(
+            "pending switch commit failed AFTER the old plan was cancelled: team_id=%s "
+            "switch_id=%s old_razorpay_subscription_id=%s new_razorpay_subscription_id=%s "
+            "-- raising so Razorpay retries (the retry will skip the already-ended old plan)",
+            team_sub.team_id, switch_id, old_razorpay_id, razorpay_subscription_id, exc_info=True,
+        )
+        db.rollback()
+        raise
+
+
 def handle_subscription_activated(db: Session, event: dict) -> None:
     razorpay_subscription_id = event["payload"]["subscription"]["entity"]["id"]
+
+    # An upgrade's replacement lives in the pending_* columns, not in
+    # razorpay_subscription_id (the current plan must stay live until this
+    # moment), so check there first.
+    pending_row = db.query(TeamSubscription).filter(
+        TeamSubscription.pending_razorpay_subscription_id == razorpay_subscription_id
+    ).with_for_update().first()
+    if pending_row is not None and pending_row.pending_razorpay_subscription_id == razorpay_subscription_id:
+        _promote_pending_switch(db, pending_row, razorpay_subscription_id)
+        return
 
     # Checkout stores the real razorpay_subscription_id on a `pending` row, so
     # this exact subscription is normally already on a row. Lock it and act on its
@@ -309,8 +458,83 @@ def handle_subscription_activated(db: Session, event: dict) -> None:
         db.rollback()
         return  # a concurrent activation won the race
 
+    # The ledger entry goes in BEFORE the refill: refill_subscription_credits commits,
+    # and the entry must land in that same transaction.
+    before = ledger_svc.subscription_pool_balance(db, team_id)
+    ledger_svc.record_subscription_grant(
+        db, team_id=team_id, balance_before=before, balance_after=credits_per_refill,
+        idempotency_key=f"sub:{razorpay_subscription_id}:cycle:1", source="webhook",
+        razorpay_subscription_id=razorpay_subscription_id,
+        metadata=ledger_svc.plan_metadata(plan, cycle=1, charged=True),
+    )
     refill_subscription_credits(db, team_id, credits_per_refill)
     db.commit()
+
+
+def apply_subscription_charge(db: Session, team_sub, plan, razor_sub: dict, source: str = "webhook") -> bool:
+    """Apply a charge Razorpay reports for `team_sub`: mark it active, and if the
+    charge is new (paid_count beyond what was last recorded) advance the period,
+    grant the renewal credits and record them in the ledger. Returns True if it
+    was a new charge.
+
+    Shared by the `subscription.charged` webhook and the reconciliation job, so a
+    charge whose webhook was lost is applied by exactly the same code -- and the
+    paid_count guard makes it a no-op if both ever see it. The caller holds the
+    row lock and commits.
+    """
+    paid_count = razor_sub.get("paid_count", 0)
+    now = datetime.now(timezone.utc)
+    period = _PERIOD[plan.period_label]
+    is_new_charge = paid_count > team_sub.last_paid_count
+
+    team_sub.status = "active"
+
+    # Idempotency: paid_count is Razorpay's own monotonic counter for this
+    # subscription, not something we derive from a clock. A redelivered webhook
+    # reports the SAME paid_count as the original, so only a value strictly
+    # greater than what we've already recorded is genuinely new — this is what
+    # stops a redelivery from re-refilling (refill REPLACES the pool, so acting
+    # twice would wipe out anything spent between deliveries) and from
+    # re-advancing next_refill_at a second time.
+    if paid_count > team_sub.last_paid_count:
+        team_sub.last_paid_count = paid_count
+        # Advance the period only for a genuinely new charge (a redelivery must
+        # not push the end date out again). Razorpay's own `current_end` is the
+        # true end of the cycle just paid for -- exact for calendar months --
+        # with now + period as the fallback if it is missing.
+        current_end = razor_sub.get("current_end")
+        if isinstance(current_end, int) and current_end > 0:
+            team_sub.current_period_end = datetime.fromtimestamp(current_end, tz=timezone.utc)
+        else:
+            team_sub.current_period_end = now + period
+        if plan.period_label != "year" and paid_count > 1:
+            team_sub.next_refill_at = now + period
+            before = ledger_svc.subscription_pool_balance(db, team_sub.team_id)
+            ledger_svc.record_subscription_grant(
+                db, team_id=team_sub.team_id, balance_before=before,
+                balance_after=team_sub.credits_per_refill,
+                idempotency_key=f"sub:{team_sub.razorpay_subscription_id}:cycle:{paid_count}",
+                source=source, razorpay_subscription_id=team_sub.razorpay_subscription_id,
+                metadata=ledger_svc.plan_metadata(plan, cycle=paid_count, charged=True),
+            )
+            refill_subscription_credits(db, team_sub.team_id, team_sub.credits_per_refill)
+
+            # Renewal notice: warn the owner one cycle before this subscription
+            # naturally completes (total_count reached). Best-effort only --
+            # send_renewal_notice_email never raises, so a failed SMTP send
+            # never surfaces as an unhandled 500 to Razorpay for a webhook
+            # that actually succeeded, and since last_paid_count already
+            # advanced above, a retry would never re-attempt the email anyway.
+            if plan.total_count and paid_count == plan.total_count - 1:
+                send_renewal_notice_email(db, team_sub)
+    # Yearly plans: a renewal charge only extends current_period_end -- the 12
+    # monthly credit slices between once-a-year charges are delivered by the
+    # daily refill_due_subscriptions scheduler in worker.py, and the renewal
+    # notice for a yearly plan is sent by that same worker's
+    # send_yearly_renewal_notices cron (keyed off current_period_end
+    # directly, since there's no second "charged" webhook to key off).
+
+    return is_new_charge
 
 
 def handle_subscription_charged(db: Session, event: dict) -> None:
@@ -336,10 +560,6 @@ def handle_subscription_charged(db: Session, event: dict) -> None:
     except Exception:
         logger.exception("could not fetch Razorpay subscription %s", razorpay_subscription_id)
         raise
-    paid_count = razor_sub.get("paid_count", 0)
-
-    now = datetime.now(timezone.utc)
-    period = _PERIOD[plan.period_label]
 
     if team_sub.status == "cancelled":
         logger.info(
@@ -355,37 +575,7 @@ def handle_subscription_charged(db: Session, event: dict) -> None:
         )
         return
 
-    team_sub.status = "active"
-    team_sub.current_period_end = now + period
-
-    # Idempotency: paid_count is Razorpay's own monotonic counter for this
-    # subscription, not something we derive from a clock. A redelivered webhook
-    # reports the SAME paid_count as the original, so only a value strictly
-    # greater than what we've already recorded is genuinely new — this is what
-    # stops a redelivery from re-refilling (refill REPLACES the pool, so acting
-    # twice would wipe out anything spent between deliveries) and from
-    # re-advancing next_refill_at a second time.
-    if paid_count > team_sub.last_paid_count:
-        team_sub.last_paid_count = paid_count
-        if plan.period_label != "year" and paid_count > 1:
-            team_sub.next_refill_at = now + period
-            refill_subscription_credits(db, team_sub.team_id, team_sub.credits_per_refill)
-
-            # Renewal notice: warn the owner one cycle before this subscription
-            # naturally completes (total_count reached). Best-effort only --
-            # send_renewal_notice_email never raises, so a failed SMTP send
-            # never surfaces as an unhandled 500 to Razorpay for a webhook
-            # that actually succeeded, and since last_paid_count already
-            # advanced above, a retry would never re-attempt the email anyway.
-            if plan.total_count and paid_count == plan.total_count - 1:
-                send_renewal_notice_email(db, team_sub)
-    # Yearly plans: a renewal charge only extends current_period_end -- the 12
-    # monthly credit slices between once-a-year charges are delivered by the
-    # daily refill_due_subscriptions scheduler in worker.py, and the renewal
-    # notice for a yearly plan is sent by that same worker's
-    # send_yearly_renewal_notices cron (keyed off current_period_end
-    # directly, since there's no second "charged" webhook to key off).
-
+    apply_subscription_charge(db, team_sub, plan, razor_sub)
     db.commit()
 
 def handle_subscription_completed(db: Session, event: dict):

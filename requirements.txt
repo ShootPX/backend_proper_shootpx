@@ -1,6 +1,7 @@
 ﻿annotated-types==0.8.0
 anyio==4.15.1
 arq==0.28.0
+boto3==1.43.112
 CacheControl==0.14.4
 certifi==2026.7.22
 cffi==2.1.1

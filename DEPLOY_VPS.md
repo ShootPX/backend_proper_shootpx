@@ -1,7 +1,7 @@
 # Deploying to a Hostinger VPS (Ubuntu 22.04/24.04)
 
 Layout: nginx (443) -> uvicorn (127.0.0.1:8000) + a separate arq worker.
-Postgres, Redis and Supabase stay external (as today); the VPS only needs outbound access.
+Postgres (Supabase, `DATABASE_URL` unchanged), Redis and object storage (Cloudflare R2 or Supabase Storage) stay external; the VPS only needs outbound access.
 
 ## 1. Server prep
 ```bash
@@ -32,6 +32,12 @@ chmod 600 .env firebase-service-account.json
 ```
 Key settings: `ENV=production`, `TRUST_PROXY=true`, `CORS_ORIGINS` = your real frontend origins,
 `PUBLIC_BACKEND_URL` = `https://<api-domain>` (fal.ai/Razorpay webhooks must reach it).
+
+Storage: set `STORAGE_BACKEND` (`r2` default, or `supabase`). For `r2` fill `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`,
+`R2_SECRET_ACCESS_KEY`, `R2_BUCKET`, `R2_PUBLIC_BASE_URL` (and optionally `R2_KEY_PREFIX`); for `supabase` fill
+`SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`. Existing database rows keep their Supabase URLs, so the Supabase
+project and its public bucket must stay available for old images to load. `DATABASE_URL` is unchanged.
+Verify R2 with `venv/bin/python scripts/r2_smoke_test.py` (reads R2_* from the environment).
 
 Apply any pending SQL in `migrations/` to your database (e.g. `psql "$DATABASE_URL" -f migrations/<file>.sql`).
 

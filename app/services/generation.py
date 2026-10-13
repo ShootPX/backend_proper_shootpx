@@ -11,7 +11,7 @@ from app.services.generation_lock import (
     extend_generation_lock_ttl,
 )
 from app.services.credits import spend_credits_up_to, refund_credits
-from app.core.storage import upload_to_storage, download_from_url
+from app.core.storage import upload_to_storage, download_from_url, detect_image_type
 from app.tools.creative_photoshoot import resolve_generation_params
 from app.tools import listing_planner, model_shoot
 
@@ -422,8 +422,9 @@ def _deliver_late_success_after_timeout(db: Session, job: GenerationJob, payload
 
     try:
         file_bytes = download_from_url(fal_url)
-        permanent_path = f"{job.team_id}/{job.feature_type}/{job.id}/output.png"
-        job.output_url = upload_to_storage(permanent_path, file_bytes)
+        content_type, ext = detect_image_type(file_bytes)
+        permanent_path = f"{job.team_id}/{job.feature_type}/{job.id}/output.{ext}"
+        job.output_url = upload_to_storage(permanent_path, file_bytes, content_type)
     except Exception:
         logger.exception(
             "late success webhook arrived for already-timed-out-and-refunded job %s, "
@@ -512,8 +513,9 @@ def handle_fal_webhook(db: Session, job_id, payload: dict):
                 refund_credits(db, job.team_id, job.credits_charged, job.credits_from_subscription, job.credits_from_topup)
             else:
                 try:
-                    permanent_path = f"{job.team_id}/{job.feature_type}/{job.id}/output.png"
-                    job.output_url = upload_to_storage(permanent_path, file_bytes)
+                    content_type, ext = detect_image_type(file_bytes)
+                    permanent_path = f"{job.team_id}/{job.feature_type}/{job.id}/output.{ext}"
+                    job.output_url = upload_to_storage(permanent_path, file_bytes, content_type)
                     job.status = "completed"
                 except Exception:
                     logger.exception("Failed to upload output to storage for job %s", job.id)

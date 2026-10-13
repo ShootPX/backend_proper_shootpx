@@ -490,6 +490,19 @@ async def generate(
                 effective_output_count, per_job_overrides=per_job_overrides,
                 lock_already_held=True,
             )
+        elif feature_type == "recolor" and image_urls:
+            # One input image -> one output, each recolored on its own. Without
+            # this every job got the whole image_urls list (flux-2/edit then
+            # treated all N as references for ONE blended result, and the
+            # vision step only ever looked at image 1). per_job_overrides makes
+            # create_generation_batch size the batch to len(image_urls) and
+            # bill per_output_cost * N, so the client's output_count (which
+            # recolor's schema doesn't even have) is deliberately ignored.
+            per_job_overrides = [{"image_urls": [url]} for url in image_urls]
+            jobs = create_generation_batch(
+                db, team_id, user.id, feature_type, input_params,
+                len(per_job_overrides), per_job_overrides=per_job_overrides,
+            )
         else:
             jobs = create_generation_batch(db, team_id, user.id, feature_type, input_params, output_count)
     except ValueError as e:
@@ -512,7 +525,11 @@ async def generate(
     # already-validated int straight from the request -- never a tool default
     # resolved internally) so this can never be "less than" some default the
     # caller never actually asked for.
-    requested_output_count = output_count if output_count and output_count > 0 else len(jobs)
+    if feature_type == "recolor" and image_urls:
+        # Recolor's batch size is the number of input images, not output_count.
+        requested_output_count = len(image_urls)
+    else:
+        requested_output_count = output_count if output_count and output_count > 0 else len(jobs)
     return {
         "batchId": str(jobs[0].batch_id),
         "jobs": [{"jobId": str(j.id), "status": j.status} for j in jobs],

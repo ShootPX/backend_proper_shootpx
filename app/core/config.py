@@ -1,5 +1,6 @@
 from typing import Literal
 
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -55,8 +56,23 @@ class Settings(BaseSettings):
     razorpay_webhook_secret: str
     fal_key: str
     public_backend_url: str
-    supabase_url: str
-    supabase_service_role_key: str
+    # --- file storage for NEW uploads ----------------------------------------
+    # Selected ONLY by this variable (never inferred from `env`). Database rows
+    # written before the switch keep their full Supabase URLs untouched.
+    storage_backend: Literal["r2", "supabase"] = "r2"
+    # Required only when storage_backend == "supabase" (checked below).
+    supabase_url: str | None = None
+    supabase_service_role_key: str | None = None
+    # Required only when storage_backend == "r2" (checked below).
+    r2_account_id: str | None = None
+    r2_access_key_id: str | None = None
+    r2_secret_access_key: str | None = None
+    r2_bucket: str | None = None
+    # Public base URL of the bucket (custom domain or r2.dev), no trailing slash.
+    r2_public_base_url: str | None = None
+    # Optional key prefix, e.g. "dev/". Normalised to no leading slash and
+    # exactly one trailing slash when non-empty.
+    r2_key_prefix: str = ""
     fal_per_team_concurrency_limit: int
     # --- worker health monitoring (both OPTIONAL, unlike everything above) ----
     # Monitoring must not become a new way for a deploy to fail to boot, so
@@ -75,6 +91,28 @@ class Settings(BaseSettings):
     # with a default, like the worker settings above. 24h leaves room for slow
     # UPI-mandate / bank-OTP authorisations.
     pending_switch_ttl_hours: int = 24
+
+    @field_validator("r2_public_base_url")
+    @classmethod
+    def _strip_trailing_slashes(cls, v: str | None) -> str | None:
+        return v.rstrip("/") if v else v
+
+    @field_validator("r2_key_prefix")
+    @classmethod
+    def _normalise_key_prefix(cls, v: str) -> str:
+        v = v.strip("/")
+        return f"{v}/" if v else ""
+
+    @model_validator(mode="after")
+    def _require_selected_backend_settings(self) -> "Settings":
+        required = {
+            "r2": ("R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET", "R2_PUBLIC_BASE_URL"),
+            "supabase": ("SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"),
+        }[self.storage_backend]
+        for name in required:
+            if not getattr(self, name.lower()):
+                raise ValueError(f"{name} is required when STORAGE_BACKEND={self.storage_backend}")
+        return self
 
     @property
     def cors_origins_list(self) -> list[str]:

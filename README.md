@@ -254,8 +254,15 @@ No silent defaults — if a variable is missing or invalid, the app refuses to s
 | `RAZORPAY_WEBHOOK_SECRET` | `xxx` | Secret configured on the Razorpay webhook — verifies `POST /billing/webhook` signatures |
 | `FAL_KEY` | `xxx` | fal.ai API key — the arq worker calls fal.ai's generation models with it |
 | `PUBLIC_BACKEND_URL` | `https://api.shootpx.com` | Publicly reachable base URL fal.ai's webhook calls back to (`{PUBLIC_BACKEND_URL}/webhooks/fal`) — needs a tunnel (e.g. ngrok) to work locally |
-| `SUPABASE_URL` | `https://xxx.supabase.co` | Supabase project URL — used for storing generated output images |
-| `SUPABASE_SERVICE_ROLE_KEY` | `xxx` | Supabase service role key (storage uploads) |
+| `STORAGE_BACKEND` | `r2` (default) or `supabase` | Where NEW generated images are uploaded. Selected only by this variable. `DATABASE_URL` is unchanged (still Supabase Postgres) |
+| `R2_ACCOUNT_ID` | `xxx` | Cloudflare account id — required when `STORAGE_BACKEND=r2` |
+| `R2_ACCESS_KEY_ID` | `xxx` | R2 API token access key id — required when `STORAGE_BACKEND=r2` |
+| `R2_SECRET_ACCESS_KEY` | `xxx` | R2 API token secret — required when `STORAGE_BACKEND=r2` |
+| `R2_BUCKET` | `shootpx-generations` | R2 bucket name — required when `STORAGE_BACKEND=r2` |
+| `R2_PUBLIC_BASE_URL` | `https://cdn.example.com` | Public base URL of the bucket (trailing slash stripped) — required when `STORAGE_BACKEND=r2` |
+| `R2_KEY_PREFIX` | `dev/` (optional) | Prefix prepended to every object key; normalised to one trailing slash |
+| `SUPABASE_URL` | `https://xxx.supabase.co` | Supabase project URL — required only when `STORAGE_BACKEND=supabase` |
+| `SUPABASE_SERVICE_ROLE_KEY` | `xxx` | Supabase service role key — required only when `STORAGE_BACKEND=supabase` |
 | `FAL_PER_TEAM_CONCURRENCY_LIMIT` | `5` | Max fal.ai jobs in flight per team at once |
 | `WORKER_WATCHDOG_SECONDS` | `180` (optional) | Seconds the worker's event loop may be silent before it alerts and exits for a restart. `0` disables |
 | `ALERT_WEBHOOK_URL` | *(unset)* (optional) | Slack/Discord-style incoming webhook that receives the `WORKER_FROZEN` alert |
@@ -310,3 +317,5 @@ tests/               pytest
 
 To rate-limit a route, add `@limiter.limit("N/minute")` under the `@router.get(...)`
 decorator and give the function a `request: Request` first argument (slowapi needs it).
+
+**Storage note:** rows created before the switch to R2 keep their full Supabase public URLs in the database and are never rewritten. The Supabase project and its public `generation-storage` bucket must stay available for those images to keep loading (including when they are re-used as inputs to fal.ai).

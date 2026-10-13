@@ -1,5 +1,7 @@
 """
-One retry policy for every outbound HTTP call that talks to fal.ai or Supabase.
+One retry policy for every outbound HTTP call that talks to fal.ai or Supabase
+(including Supabase Storage uploads; Cloudflare R2 uploads go through boto3, which
+has its own retry config in app/core/storage.py and does not use this module).
 
 Why: an intermittent network stall on a single call used to fail a whole
 generation outright ("fal submit failed: The read operation timed out", seen

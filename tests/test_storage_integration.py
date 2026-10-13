@@ -60,7 +60,7 @@ def test_success_downloads_uploads_and_stores_permanent_url(monkeypatch):
 
     download.assert_called_once_with("https://fal.ai/tmp/x.png")
     expected_path = f"{job.team_id}/{job.feature_type}/{job.id}/output.png"
-    upload.assert_called_once_with(expected_path, b"fake-image-bytes")
+    upload.assert_called_once_with(expected_path, b"fake-image-bytes", "image/png")
     assert job.status == "completed"
     assert job.output_url == "https://our-storage.test/permanent/output.png"  # OUR url, not fal's
     refund.assert_not_called()
@@ -194,7 +194,7 @@ def test_late_webhook_success_after_timeout_failure_delivers_output_without_rech
     )
 
     download.assert_called_once_with("https://fal.test/late.png")
-    upload.assert_called_once_with(f"{job.team_id}/{job.feature_type}/{job.id}/output.png", b"real-bytes")
+    upload.assert_called_once_with(f"{job.team_id}/{job.feature_type}/{job.id}/output.png", b"real-bytes", "image/png")
     assert job.status == "completed"
     assert job.output_url == "https://our-storage.test/permanent/late.png"
     refund.assert_not_called()           # no double-refund

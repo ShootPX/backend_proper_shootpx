@@ -1755,7 +1755,7 @@ def test_generate_forwards_recolors_aspect_ratio_and_resolution_fields(gen_clien
 
     captured = {}
 
-    def fake_create_batch(db_, team_id, user_id, feature_type, input_params, output_count):
+    def fake_create_batch(db_, team_id, user_id, feature_type, input_params, output_count, per_job_overrides=None):
         captured["input_params"] = input_params
         return [MagicMock(id=uuid.uuid4(), batch_id=uuid.uuid4(), status="queued")]
     monkeypatch.setattr("app.routes.generation.create_generation_batch", fake_create_batch)
@@ -1875,6 +1875,49 @@ def test_generate_plans_shots_and_uses_per_job_overrides_for_listing_photoshoot(
     plan.assert_called_once_with(tool, ["https://fal.test/uploaded.png"], None, 4)  # falls back to tool.default_output_count
     assert captured["per_job_overrides"] == planned_shots
     assert captured["output_count"] == 4
+
+
+def test_generate_recolor_fans_out_one_job_per_input_image_ignoring_output_count(gen_client, monkeypatch):
+    """4 images -> 4 jobs, each with ONLY its own image, regardless of the
+    output_count the client sent (recolor's schema has no such field)."""
+    client, fake_user, db = gen_client
+    monkeypatch.setattr("app.routes.generation.is_team_member", lambda db, tid, uid: True)
+    db.query.return_value.filter.return_value.first.return_value = MagicMock(
+        max_input_images=5, default_output_count=1, param_schema=[], is_active=True, stage=1,
+    )
+    uploads = iter(f"https://fal.test/{i}.png" for i in range(4))
+    monkeypatch.setattr("app.routes.generation.upload_image_to_fal", lambda *a, **k: next(uploads))
+
+    captured = {}
+
+    def fake_create_batch(db_, team_id, user_id, feature_type, input_params, output_count=1, per_job_overrides=None, lock_already_held=False):
+        captured["output_count"] = output_count
+        captured["per_job_overrides"] = per_job_overrides
+        return [MagicMock(id=uuid.uuid4(), batch_id=uuid.uuid4(), status="queued") for _ in per_job_overrides]
+    monkeypatch.setattr("app.routes.generation.create_generation_batch", fake_create_batch)
+
+    async def fake_get_arq_pool():
+        pool = MagicMock()
+
+        async def enqueue_job(*a, **k):
+            return None
+        pool.enqueue_job = enqueue_job
+        return pool
+    monkeypatch.setattr("app.routes.generation.get_arq_pool", fake_get_arq_pool)
+
+    res = client.post(
+        "/generate",
+        data={"team_id": str(TEAM_ID), "feature_type": "recolor", "output_count": "1"},
+        files=[("images", (f"{i}.png", b"fake-image-bytes", "image/png")) for i in range(4)],
+        headers={"Authorization": "Bearer x"},
+    )
+
+    assert res.status_code == 200
+    assert captured["output_count"] == 4
+    assert captured["per_job_overrides"] == [{"image_urls": [f"https://fal.test/{i}.png"]} for i in range(4)]
+    body = res.json()
+    assert len(body["jobs"]) == 4
+    assert body["requestedCount"] == 4 and body["partial"] is False
 
 
 def test_generate_never_plans_shots_when_a_generation_is_already_in_progress(gen_client, monkeypatch):

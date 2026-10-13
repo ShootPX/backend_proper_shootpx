@@ -1,7 +1,11 @@
 import logging
 import re
+import threading
 
+import boto3
 import httpx
+from botocore.config import Config
+from botocore.exceptions import BotoCoreError, ClientError
 from app.core.config import settings
 from app.core.http_retry import send_with_retry
 
@@ -22,11 +26,83 @@ def _validate_storage_path(file_path: str) -> None:
         raise ValueError(f"Unsafe storage path: {file_path!r}")
 
 
+def detect_image_type(data: bytes) -> tuple[str, str]:
+    """(content_type, extension) from magic bytes; falls back to PNG."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png", "png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg", "jpg"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp", "webp"
+    return "image/png", "png"
+
+
 def upload_to_storage(file_path: str, file_bytes: bytes, content_type: str = "image/png") -> str:
     """
-    Uploads a file to the Supabase Storage bucket at the given path.
-    Returns the public URL where it can be accessed.
+    Uploads a file to the configured storage backend (STORAGE_BACKEND).
+    Returns the public URL of what was just written. URLs already stored in the
+    database are never touched.
     """
+    if settings.storage_backend == "r2":
+        return _upload_r2(file_path, file_bytes, content_type)
+    return _upload_supabase(file_path, file_bytes, content_type)
+
+
+_r2_client = None
+_r2_client_lock = threading.Lock()
+
+
+def _get_r2_client():
+    global _r2_client
+    if _r2_client is None:
+        with _r2_client_lock:
+            if _r2_client is None:
+                _r2_client = boto3.client(
+                    "s3",
+                    endpoint_url=f"https://{settings.r2_account_id}.r2.cloudflarestorage.com",
+                    aws_access_key_id=settings.r2_access_key_id,
+                    aws_secret_access_key=settings.r2_secret_access_key,
+                    region_name="auto",
+                    config=Config(
+                        signature_version="s3v4",
+                        retries={"max_attempts": 3, "mode": "standard"},
+                        connect_timeout=10,
+                        read_timeout=30,
+                    ),
+                )
+    return _r2_client
+
+
+def _upload_r2(file_path: str, file_bytes: bytes, content_type: str) -> str:
+    key = f"{settings.r2_key_prefix}{file_path}"
+    _validate_storage_path(key)
+    try:
+        _get_r2_client().put_object(
+            Bucket=settings.r2_bucket,
+            Key=key,
+            Body=file_bytes,
+            ContentType=content_type,
+            CacheControl="public, max-age=31536000, immutable",
+        )
+    except ClientError as e:
+        # Same exception types the Supabase path raises, so callers' failure
+        # handling (mark job failed + refund) is unchanged. Only the error
+        # code is included: never credentials.
+        code = e.response.get("Error", {}).get("Code", "unknown")
+        status = e.response.get("ResponseMetadata", {}).get("HTTPStatusCode") or 502
+        logger.exception("R2 storage upload rejected [%s]: %s", status, code)
+        request = httpx.Request("PUT", f"{settings.r2_public_base_url}/{key}")
+        raise httpx.HTTPStatusError(
+            f"R2 upload failed: {code}", request=request, response=httpx.Response(status, request=request)
+        ) from e
+    except BotoCoreError as e:
+        logger.exception("R2 storage upload failed: %s", type(e).__name__)
+        raise httpx.TransportError(f"R2 upload failed: {type(e).__name__}") from e
+    return f"{settings.r2_public_base_url}/{key}"
+
+
+def _upload_supabase(file_path: str, file_bytes: bytes, content_type: str) -> str:
+    """Uploads a file to the Supabase Storage bucket at the given path."""
     _validate_storage_path(file_path)
     url = f"{settings.supabase_url}/storage/v1/object/{BUCKET_NAME}/{file_path}"
 

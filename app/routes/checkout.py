@@ -12,6 +12,7 @@ from app.services.billing import (
     create_credit_pack_checkout,
     create_subscription_checkout,
     cancel_subscription,
+    cancel_pending_switch,
     RazorpayCancelError,
     PlanSwitchBlocked,
     switch_subscription
@@ -75,6 +76,25 @@ def cancel_team_subscription(
         raise HTTPException(status_code=400, detail=str(e))
 
     return {"status": "cancelled", "teamId": str(team_id)}
+
+
+@router.post("/teams/{team_id}/subscriptions/switch/cancel")
+@limiter.limit("10/minute")
+def cancel_team_pending_switch(
+    request: Request,
+    team_id: UUID,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    if not is_team_owner(db, team_id, user.id):
+        raise HTTPException(status_code=403, detail="Only the team owner can cancel a pending upgrade")
+
+    try:
+        result = cancel_pending_switch(db, team_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return {"status": result, "teamId": str(team_id)}
 
 
 @router.post("/teams/{team_id}/subscriptions/{new_subscription_id}/switch")

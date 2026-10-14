@@ -479,3 +479,49 @@ def test_team_billing_status_has_no_pending_switch_normally(world):
     )
 
     assert teams_svc.get_team_billing(db, TEAM_ID)["pending_switch"] is None
+
+
+# --------------------------------------------------------------------------- #
+# user-initiated cancel (Razorpay popup dismissed)
+# --------------------------------------------------------------------------- #
+
+def test_user_cancel_cancels_the_unpaid_replacement_and_keeps_the_live_plan(world):
+    world.rzp.statuses[NEW_ID] = "created"
+
+    assert billing_svc.cancel_pending_switch(world.db, TEAM_ID) == "cancelled"
+
+    assert world.rzp.cancelled == [NEW_ID]
+    assert world.row.pending_razorpay_subscription_id is None
+    assert world.row.pending_switch_id is None
+    assert world.row.pending_switch_expires_at is None
+    assert world.row.status == "active"
+    assert world.row.razorpay_subscription_id == OLD_ID
+    world.db.commit.assert_called_once()
+
+
+def test_user_cancel_never_cancels_a_payment_already_taken(world):
+    world.rzp.statuses[NEW_ID] = "authenticated"
+
+    assert billing_svc.cancel_pending_switch(world.db, TEAM_ID) == "in_flight"
+
+    assert world.rzp.cancelled == []                       # the webhook wins
+    assert world.row.pending_razorpay_subscription_id == NEW_ID
+    world.db.commit.assert_not_called()
+
+
+def test_user_cancel_is_a_noop_when_nothing_is_pending(world):
+    world.row.pending_razorpay_subscription_id = None
+
+    assert billing_svc.cancel_pending_switch(world.db, TEAM_ID) == "none"
+    assert world.rzp.cancelled == []
+
+
+def test_user_cancel_keeps_the_switch_when_razorpay_cancel_fails(world):
+    world.rzp.statuses[NEW_ID] = "created"
+    world.rzp.fail_cancel.add(NEW_ID)
+
+    with pytest.raises(ValueError):
+        billing_svc.cancel_pending_switch(world.db, TEAM_ID)
+
+    assert world.row.pending_razorpay_subscription_id == NEW_ID
+    world.db.commit.assert_not_called()

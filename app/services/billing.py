@@ -422,6 +422,57 @@ def switch_subscription(db: Session, team_id, new_subscription_id) -> dict:
     }
 
 
+def cancel_pending_switch(db: Session, team_id) -> str:
+    """Abandon the team's unpaid upgrade on request (the user closed Razorpay).
+    Returns "none" (nothing pending), "cancelled" (unpaid replacement cancelled and
+    cleared), "cleared" (Razorpay already considered it dead) or "in_flight" (it was
+    paid, or is being paid -- left for its `activated` webhook, which always wins).
+    The live plan is never touched."""
+    row = (
+        db.query(TeamSubscription)
+        .filter(
+            TeamSubscription.team_id == team_id,
+            TeamSubscription.status.in_(["active", "pending"]),
+        )
+        .with_for_update()
+        .first()
+    )
+    if row is None or not row.pending_razorpay_subscription_id:
+        db.rollback()
+        return "none"
+
+    pending_id = row.pending_razorpay_subscription_id
+    try:
+        status = razorpay_client.subscription.fetch(pending_id).get("status")
+    except Exception:
+        db.rollback()
+        logger.exception("could not check pending switch %s for team %s", pending_id, team_id)
+        raise ValueError("Could not check your pending upgrade. Please try again.")
+
+    if status not in ("created", "cancelled", "expired"):
+        # Paid or being paid: cancelling would cancel money already taken.
+        db.rollback()
+        return "in_flight"
+
+    if status == "created":
+        try:
+            razorpay_client.subscription.cancel(pending_id)
+        except Exception:
+            db.rollback()
+            logger.warning(
+                "could not cancel pending switch %s for team %s", pending_id, team_id, exc_info=True,
+            )
+            raise ValueError("Could not cancel your pending upgrade. Please try again.")
+
+    logger.info(
+        "pending switch cancelled by user: team_id=%s switch_id=%s razorpay=%s (was %r)",
+        team_id, row.pending_switch_id, pending_id, status,
+    )
+    clear_pending_switch(row)
+    db.commit()
+    return "cancelled" if status == "created" else "cleared"
+
+
 def expire_pending_switch(db: Session, team_subscription_id, now: datetime | None = None) -> str:
     """Expire one stale pending switch. Returns what happened:
     "skipped" (nothing to do / locked by someone else / not yet due),
